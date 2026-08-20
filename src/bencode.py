@@ -28,3 +28,31 @@ def decode(data: bytes):
     
     result, _ = _decode(data)
     return result
+
+
+def encode(data) -> bytes:
+    """Encode data to bencode format"""
+    if isinstance(data, int):
+        return b'i' + str(data).encode() + b'e'
+
+    elif isinstance(data, bytes):
+        return str(len(data)).encode() + b':' + data
+
+    elif isinstance(data, str):
+        encoded_str = data.encode()
+        return str(len(encoded_str)).encode() + b':' + encoded_str
+
+    elif isinstance(data, list):
+        return b'l' + b''.join(encode(item) for item in data) + b'e'
+
+    elif isinstance(data, dict):
+        # Bencode spec requires dict keys to be sorted (as raw bytes)
+        result = b'd'
+        for key in sorted(data.keys()):
+            result += encode(key)
+            result += encode(data[key])
+        result += b'e'
+        return result
+
+    else:
+        raise TypeError(f"Type {type(data)} not bencodable")
