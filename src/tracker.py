@@ -4,6 +4,8 @@ import asyncio
 from urllib.parse import urlencode
 import struct
 
+from src.bencode import decode
+
 class TrackerClient:
     def __init__(self, torrent, peer_id):
         self.torrent = torrent
