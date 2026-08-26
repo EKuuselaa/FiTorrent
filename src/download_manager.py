@@ -1,9 +1,9 @@
 import asyncio
-import hashlib
 import os
 import struct
 
 from src.peer import PeerConnection, PIECE, UNCHOKE, BLOCK_SIZE
+from src.piece_manager import PieceManager
 from src.tracker import TrackerClient
 
 
@@ -15,15 +15,7 @@ class DownloadManager:
         self.max_peers = max_peers
 
         self.tracker = TrackerClient(torrent, peer_id)
-
-        self.piece_queue = asyncio.Queue()
-        for index in range(torrent.num_pieces):
-            self.piece_queue.put_nowait(index)
-
-        self.pieces = [None] * torrent.num_pieces
-        self.completed = 0
-        self.downloaded = 0
-        self.lock = asyncio.Lock()
+        self.piece_manager = PieceManager(torrent)
 
     async def start(self):
         """Announce to the tracker, download all pieces, then assemble the file"""
@@ -33,13 +25,13 @@ class DownloadManager:
             asyncio.create_task(self._worker(ip, port))
             for ip, port in peers[:self.max_peers]
         ]
-        await self.piece_queue.join()
+        await self.piece_manager.join()
 
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
 
-        self._assemble_file()
+        self.piece_manager.assemble_file(self.output_path)
 
     async def _worker(self, ip, port):
         """Connect to a single peer and download pieces from it until the queue is empty"""
@@ -50,20 +42,18 @@ class DownloadManager:
             await self._wait_for_unchoke(conn)
 
             while True:
-                index = await self.piece_queue.get()
+                index = await self.piece_manager.get_index()
                 try:
                     if conn.bitfield is not None and not conn.has_piece(index):
-                        await self.piece_queue.put(index)
+                        await self.piece_manager.requeue(index)
                         await asyncio.sleep(0.1)
                         continue
 
                     data = await self._download_piece(conn, index)
-                    if data is not None:
-                        await self._store_piece(index, data)
-                    else:
-                        await self.piece_queue.put(index)
+                    if data is None or not await self.piece_manager.store(index, data):
+                        await self.piece_manager.requeue(index)
                 finally:
-                    self.piece_queue.task_done()
+                    self.piece_manager.task_done()
         except (ConnectionError, OSError, asyncio.IncompleteReadError):
             return
         finally:
@@ -78,8 +68,8 @@ class DownloadManager:
         await asyncio.wait_for(_wait(), timeout)
 
     async def _download_piece(self, conn, index):
-        """Request and assemble every block of a single piece, verifying its hash"""
-        piece_length = self._piece_length(index)
+        """Request and assemble every block of a single piece"""
+        piece_length = self.piece_manager.piece_length(index)
         blocks = bytearray(piece_length)
         offset = 0
 
@@ -96,27 +86,8 @@ class DownloadManager:
             blocks[begin:begin + len(block)] = block
             offset += length
 
-        if hashlib.sha1(bytes(blocks)).digest() != self.torrent.get_piece_hash(index):
-            return None
         return bytes(blocks)
-
-    def _piece_length(self, index):
-        if index == self.torrent.num_pieces - 1:
-            return self.torrent.total_length - self.torrent.piece_length * index
-        return self.torrent.piece_length
-
-    async def _store_piece(self, index, data):
-        async with self.lock:
-            self.pieces[index] = data
-            self.completed += 1
-            self.downloaded += len(data)
-
-    def _assemble_file(self):
-        os.makedirs(os.path.dirname(self.output_path) or '.', exist_ok=True)
-        with open(self.output_path, 'wb') as f:
-            for piece in self.pieces:
-                f.write(piece or b'')
 
     @property
     def progress(self):
-        return self.completed / self.torrent.num_pieces
+        return self.piece_manager.progress
