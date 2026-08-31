@@ -24,8 +24,9 @@ class TrackerClient:
             'event': 'started'
         }
         
+        query = urlencode(params)
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.torrent.announce, params=params) as resp:
+            async with session.get(f'{self.torrent.announce}?{query}') as resp:
                 response = decode(await resp.read())
                 return self._parse_peers(response[b'peers'])
     
